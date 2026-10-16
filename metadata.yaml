@@ -1,0 +1,14 @@
+name: astrbot_plugin_xiaohui_weather_care
+display_name: 小回·天气关怀
+desc: |
+  两部分能力：
+  1. 按需天气工具：用户问天气时，由对话模型自然调用 get_weather（Open-Meteo）。
+  2. 前一天条件提醒：每天到点检查明天与今天的温差、降雨概率，
+     只有命中阈值时才向 xavier_reminder 落一条即时提醒，
+     由它走完整的伪造消息注入管线（自动继承意识同步拦截、合并窗口、防抖）。
+
+  本插件只取数与判断，不自己发消息、不自己调 LLM、不自己写历史。
+short_desc: 前一天天气条件提醒 + 按需天气工具
+version: 0.1.0
+author: local
+astrbot_version: ">=4.28.2"

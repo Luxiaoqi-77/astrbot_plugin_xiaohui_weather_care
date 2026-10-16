@@ -1,0 +1,78 @@
+{
+  "enabled": {
+    "description": "启用「前一天条件提醒」",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只在对话里保留天气工具，不再做每晚的条件提醒。"
+  },
+  "location_name": {
+    "description": "地点名称（仅用于话术）",
+    "type": "string",
+    "default": "示例城市",
+    "hint": "只影响提醒文案里的称呼；真正的坐标以下方经纬度为准。"
+  },
+  "latitude": {
+    "description": "纬度",
+    "type": "float",
+    "default": 39.9042,
+    "hint": "示例城市中心 ≈ 39.9042。建议用坐标而不是城市名（Open-Meteo 的地理编码对某些区县名不敏感）。"
+  },
+  "longitude": {
+    "description": "经度",
+    "type": "float",
+    "default": 116.4074,
+    "hint": "示例城市区中心 ≈ 116.4074。"
+  },
+  "timezone": {
+    "description": "时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "用于判断检查时间与“今天/明天”。"
+  },
+  "check_time": {
+    "description": "每日检查时间（HH:MM）",
+    "type": "string",
+    "default": "21:00",
+    "hint": "到点检查一次；命中阈值才提醒，否则不打扰。"
+  },
+  "check_window_minutes": {
+    "description": "检查窗口（分钟）",
+    "type": "int",
+    "default": 90,
+    "minimum": 1,
+    "maximum": 720,
+    "hint": "只在这个窗口内补跑一次（例如 21:00 时机器人没开机，21:30 起来仍会检查）；错过窗口不补发。"
+  },
+  "temp_delta_threshold": {
+    "description": "温差阈值（℃）",
+    "type": "float",
+    "default": 3.0,
+    "hint": "明天最高温或最低温相对今天变化达到该值即提醒。设很大可关闭温差提醒。"
+  },
+  "precip_probability_threshold": {
+    "description": "降雨概率阈值（%）",
+    "type": "int",
+    "default": 70,
+    "hint": "明天降雨概率「严格大于」该值才提醒。设 100 可关闭降雨提醒。"
+  },
+  "owner_umo": {
+    "description": "提醒投递目标（UMO）",
+    "type": "string",
+    "default": "qq_napcat_2258780898:FriendMessage:2870791457",
+    "hint": "所有者私聊的 unified_msg_origin。默认即本机主人私聊。"
+  },
+  "weather_tool_enabled": {
+    "description": "启用按需天气工具",
+    "type": "bool",
+    "default": true,
+    "hint": "注册 get_weather 工具，用户问天气时由对话模型自然调用。"
+  },
+  "request_timeout": {
+    "description": "HTTP 超时（秒）",
+    "type": "int",
+    "default": 15,
+    "minimum": 3,
+    "maximum": 60,
+    "hint": "访问 Open-Meteo 的超时。"
+  }
+}
