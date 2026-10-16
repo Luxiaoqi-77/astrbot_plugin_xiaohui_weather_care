@@ -58,7 +58,7 @@
   "owner_umo": {
     "description": "提醒投递目标（UMO）",
     "type": "string",
-    "default": "qq_napcat_2258780898:FriendMessage:2870791457",
+    "default": "qq_napcat_100000002:FriendMessage:100000001",
     "hint": "所有者私聊的 unified_msg_origin。默认即本机主人私聊。"
   },
   "weather_tool_enabled": {

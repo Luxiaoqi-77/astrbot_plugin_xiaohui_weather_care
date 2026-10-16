@@ -39,7 +39,7 @@ from .logic import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_xiaohui_weather_care"
-DEFAULT_OWNER_UMO = "qq_napcat_2258780898:FriendMessage:2870791457"
+DEFAULT_OWNER_UMO = "qq_napcat_100000002:FriendMessage:100000001"
 
 
 @register(
