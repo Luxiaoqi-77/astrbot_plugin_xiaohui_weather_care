@@ -1,208 +1,178 @@
-"""小回·天气关怀 —— 纯逻辑层。
-
-只做两件事，全部是无副作用的纯函数，方便离线测试：
-1. 组装 Open-Meteo 请求 URL / 解析逐日预报；
-2. 按"温差或降雨概率"规则判断是否值得提醒，并生成给提醒插件的自然语言素材。
-
-不在此文件里做任何网络请求、不碰 AstrBot 上下文。
-"""
+"""中国天气网（中央气象台）逐日预报解析与天气关怀判断；不触网、不发消息。"""
 
 from __future__ import annotations
 
-import json
+import math
+import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
+from typing import Any
+from zoneinfo import ZoneInfo
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+SOURCE = "中国天气网（中央气象台）"
 
-DAILY_FIELDS = (
-    "weather_code",
-    "temperature_2m_max",
-    "temperature_2m_min",
-    "precipitation_probability_max",
-)
 
-# WMO weather code → 中文短语（够用即可，未知码回落为"未知"）
-WMO_DESC: dict[int, str] = {
-    0: "晴",
-    1: "大部晴朗",
-    2: "多云",
-    3: "阴",
-    45: "雾",
-    48: "雾凇",
-    51: "毛毛雨",
-    53: "毛毛雨",
-    55: "毛毛雨",
-    56: "冻毛毛雨",
-    57: "冻毛毛雨",
-    61: "小雨",
-    63: "中雨",
-    65: "大雨",
-    66: "冻雨",
-    67: "冻雨",
-    71: "小雪",
-    73: "中雪",
-    75: "大雪",
-    77: "米雪",
-    80: "阵雨",
-    81: "阵雨",
-    82: "强阵雨",
-    85: "阵雪",
-    86: "强阵雪",
-    95: "雷阵雨",
-    96: "雷阵雨伴冰雹",
-    99: "雷阵雨伴冰雹",
-}
+def build_url(city_id: str) -> str:
+    if not re.fullmatch(r"101[0-9]{6}", city_id):
+        raise ValueError("中国天气网地区编号格式不正确")
+    return f"https://www.weather.com.cn/weather/{city_id}.shtml"
+
+
+def _temperature(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and -90 <= number <= 65 else None
+    except (ValueError, TypeError):
+        return None
 
 
 @dataclass(frozen=True)
 class DayRow:
-    """一天的结构化预报。字段缺失时保留 None，绝不猜数。"""
-
     date: str
-    code: Optional[int] = None
-    tmax: Optional[float] = None
-    tmin: Optional[float] = None
-    precip_prob: Optional[int] = None
+    tmax: float | None = None
+    tmin: float | None = None
+    day_text: str = "未知"
+    night_text: str = "未知"
 
     @property
     def desc(self) -> str:
-        if self.code is None:
-            return "未知"
-        return WMO_DESC.get(int(self.code), "未知")
+        return f"白天{self.day_text}、夜间{self.night_text}"
+
+    @property
+    def wet(self) -> bool:
+        return any(
+            word in text
+            for text in (self.day_text, self.night_text)
+            for word in ("雨", "雪")
+        )
 
     def summary(self) -> str:
-        """给模型看的一行摘要，例如「10-17 阴 24~33℃ 降雨概率39%」。"""
         parts = [self.date, self.desc]
         if self.tmin is not None and self.tmax is not None:
             parts.append(f"{self.tmin:.0f}~{self.tmax:.0f}℃")
-        if self.precip_prob is not None:
-            parts.append(f"降雨概率{self.precip_prob}%")
         return " ".join(parts)
 
 
-def build_url(latitude: float, longitude: float, timezone: str, days: int) -> str:
-    """组装 Open-Meteo 逐日预报 URL。days 会被夹到 1~7。"""
-    safe_days = max(1, min(7, int(days)))
-    tz = timezone or "Asia/Shanghai"
-    return (
-        f"{OPEN_METEO_URL}"
-        f"?latitude={float(latitude)}"
-        f"&longitude={float(longitude)}"
-        f"&daily={','.join(DAILY_FIELDS)}"
-        f"&timezone={tz}"
-        f"&forecast_days={safe_days}"
-    )
+class _ForecastPage(HTMLParser):
+    """只提取七日预报列表、地区标题和完整发布时间，不执行网页脚本。"""
+
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self.updated = ""
+        self.rows = []
+        self.row = None
+        self.paragraph = ""
+        self.capture = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "").split()
+        if tag == "title":
+            self.capture = "title"
+        if tag == "input" and attrs.get("id") == "fc_24h_internal_update_time":
+            self.updated = attrs.get("value", "")
+        if tag == "li" and "sky" in classes:
+            if self.row is not None:
+                raise ValueError("七日预报列表嵌套异常")
+            self.row = {
+                "day": "",
+                "high": "",
+                "low": "",
+                "weather": "",
+                "has_day": False,
+            }
+        if self.row is None:
+            return
+        if tag == "big" and any(re.fullmatch(r"d[0-9]{2}", c) for c in classes):
+            self.row["has_day"] = True
+        if tag == "h1":
+            self.capture = "day"
+        if tag == "p":
+            self.paragraph = "tem" if "tem" in classes else ""
+            if "wea" in classes:
+                self.row["weather"] = attrs.get("title", "").strip()
+        if self.paragraph == "tem" and tag in ("span", "i"):
+            self.capture = "high" if tag == "span" else "low"
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data):
+        if self.capture == "title":
+            self.title += data
+        elif self.row is not None and self.capture:
+            self.row[self.capture] += data
+
+    def handle_endtag(self, tag):
+        if tag in ("title", "h1", "span", "i"):
+            self.capture = ""
+        if tag == "p":
+            self.paragraph = ""
+        if tag == "li" and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
 
 
-def _as_float(value: Any) -> Optional[float]:
+def parse_daily(
+    payload: str, location: str, now: datetime, days: int = 3
+) -> list[DayRow]:
+    """校验地区、发布时间及逐日日期；缺少概率时不猜测百分比。"""
+    if not isinstance(payload, str):
+        raise ValueError("中国天气网未返回有效网页")
+    page = _ForecastPage()
+    page.feed(payload)
+    if f"{location}天气" not in page.title:
+        raise ValueError("中国天气网返回地区不匹配或页面不可用")
+    now = now.astimezone(ZoneInfo("Asia/Shanghai"))
     try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value: Any) -> Optional[int]:
-    num = _as_float(value)
-    return None if num is None else int(round(num))
-
-
-def parse_daily(payload: Any, expected_days: int = 3) -> list[DayRow]:
-    """把 Open-Meteo 的 JSON 解析成 DayRow 列表；结构不对就返回空列表。
-
-    Args:
-        payload: 响应对象（dict）或 JSON 字符串。
-        expected_days: 期望天数，预留给调用方，不强制截断。
-
-    Returns:
-        DayRow 列表，按响应里的日期顺序（Open-Meteo 为升序）。
-    """
-    if isinstance(payload, (str, bytes, bytearray)):
-        try:
-            payload = json.loads(payload)
-        except (ValueError, TypeError):
-            return []
-    if not isinstance(payload, dict):
-        return []
-
-    daily = payload.get("daily")
-    if not isinstance(daily, dict):
-        return []
-
-    dates = daily.get("time")
-    if not isinstance(dates, list) or not dates:
-        return []
-
-    def _col(name: str) -> list[Any]:
-        col = daily.get(name)
-        return col if isinstance(col, list) else []
-
-    codes = _col("weather_code")
-    tmaxs = _col("temperature_2m_max")
-    tmins = _col("temperature_2m_min")
-    probs = _col("precipitation_probability_max")
-
-    rows: list[DayRow] = []
-    for idx, date in enumerate(dates):
-        if not isinstance(date, str):
-            continue
-
-        def _pick(col: list[Any]) -> Any:
-            return col[idx] if idx < len(col) else None
-
-        rows.append(
-            DayRow(
-                date=date,
-                code=_as_int(_pick(codes)),
-                tmax=_as_float(_pick(tmaxs)),
-                tmin=_as_float(_pick(tmins)),
-                precip_prob=_as_int(_pick(probs)),
-            )
-        )
-    return rows
+        updated = datetime.strptime(page.updated, "%Y%m%d%H").replace(tzinfo=now.tzinfo)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("中国天气网预报缺少有效发布时间") from exc
+    if not -timedelta(minutes=15) <= now - updated <= timedelta(hours=24):
+        raise ValueError("中国天气网预报发布时间异常或已过期")
+    if len(page.rows) != 7:
+        raise ValueError("中国天气网七日预报列表不完整")
+    rows = {}
+    for offset, item in enumerate(page.rows):
+        date = updated.date() + timedelta(days=offset)
+        if not re.match(rf"^{date.day}日[（(]", item["day"].strip()):
+            raise ValueError("中国天气网逐日日期与发布时间不一致")
+        weather = item["weather"]
+        if not weather:
+            raise ValueError("中国天气网缺少天气现象")
+        parts = weather.split("转", 1)
+        day_text, night_text = (parts[0], parts[-1])
+        if not item["has_day"]:
+            day_text = "未知（白天预报已结束）"
+        high = _temperature(item["high"].replace("℃", "").strip())
+        low = _temperature(item["low"].replace("℃", "").strip())
+        if date > now.date() and (high is None or low is None or not item["has_day"]):
+            raise ValueError("中国天气网未来预报字段不完整")
+        rows[date] = DayRow(date.isoformat(), high, low, day_text, night_text)
+    dates = [now.date() + timedelta(days=i) for i in range(max(1, min(7, int(days))))]
+    if any(date not in rows for date in dates):
+        raise ValueError("中国天气网预报未覆盖请求日期")
+    return [rows[date] for date in dates]
 
 
 @dataclass(frozen=True)
 class Verdict:
-    """一次判断的结果。"""
-
     triggered: bool
-    reasons: tuple[str, ...]  # 命中原因（中文短语，便于日志）
+    reasons: tuple[str, ...]
     temp_hit: bool
     precip_hit: bool
-    temp_direction: str  # "up" / "down" / ""
-    max_delta: Optional[float]  # 命中的温差绝对值最大值
+    temp_direction: str
+    max_delta: float | None
 
 
 def evaluate(
-    today: Optional[DayRow],
-    tomorrow: Optional[DayRow],
-    temp_delta_threshold: float,
-    precip_probability_threshold: int,
+    today: DayRow | None, tomorrow: DayRow | None, temp_delta_threshold: float
 ) -> Verdict:
-    """判断"明天"是否值得提醒。
-
-    命中条件（任一）：
-      1. |明天最高温 - 今天最高温| >= 阈值；
-      2. |明天最低温 - 今天最低温| >= 阈值；
-      3. 明天降雨概率 > 阈值（严格大于）。
-
-    Args:
-        today: 今天（可能缺字段）。
-        tomorrow: 明天（可能缺字段）。
-        temp_delta_threshold: 温差阈值（摄氏度）。
-        precip_probability_threshold: 降雨概率阈值（百分比，严格大于）。
-
-    Returns:
-        Verdict。数据不足时不触发。
-    """
     reasons: list[str] = []
     direction = ""
-    max_delta: Optional[float] = None
-    temp_hit = False
-
+    max_delta = None
     if today is not None and tomorrow is not None:
         for label, a, b in (
             ("最高温", today.tmax, tomorrow.tmax),
@@ -210,78 +180,138 @@ def evaluate(
         ):
             if a is None or b is None:
                 continue
-            delta = float(b) - float(a)
-            if abs(delta) >= float(temp_delta_threshold):
-                temp_hit = True
-                direction = "up" if delta > 0 else "down"
-                sign = "升" if delta > 0 else "降"
-                reasons.append(f"{label}{sign}{abs(delta):.0f}℃")
+            delta = b - a
+            if abs(delta) >= temp_delta_threshold:
+                reasons.append(f"{label}{'升' if delta > 0 else '降'}{abs(delta):.0f}℃")
                 if max_delta is None or abs(delta) > max_delta:
                     max_delta = abs(delta)
-
-    precip_hit = bool(
-        tomorrow is not None
-        and tomorrow.precip_prob is not None
-        and int(tomorrow.precip_prob) > int(precip_probability_threshold)
-    )
+                    direction = "up" if delta > 0 else "down"
+    temp_hit = bool(reasons)
+    precip_hit = tomorrow is not None and tomorrow.wet
     if precip_hit:
-        reasons.append(f"降雨概率{tomorrow.precip_prob}%")  # type: ignore[union-attr]
-
+        reasons.append(tomorrow.desc)
     return Verdict(
-        triggered=bool(reasons),
-        reasons=tuple(reasons),
-        temp_hit=temp_hit,
-        precip_hit=precip_hit,
-        temp_direction=direction,
-        max_delta=max_delta,
+        bool(reasons), tuple(reasons), temp_hit, precip_hit, direction, max_delta
     )
 
 
 def build_reminder_content(
-    location: str,
-    today: Optional[DayRow],
-    tomorrow: Optional[DayRow],
-    verdict: Verdict,
+    location: str, today: DayRow | None, tomorrow: DayRow | None, verdict: Verdict
 ) -> str:
-    """生成交给提醒插件的"待提醒事项"文案（事实为主，附带一句建议）。"""
     if tomorrow is None or not verdict.triggered:
         return ""
-
-    loc = location or "所在地"
-    facts: list[str] = []
-
+    facts = [f"{SOURCE}预报：明天{location or '所在地'}{tomorrow.desc}"]
+    if tomorrow.tmin is not None and tomorrow.tmax is not None:
+        facts.append(f"{tomorrow.tmin:.0f}～{tomorrow.tmax:.0f}℃")
     if verdict.temp_hit:
-        verb = "升温" if verdict.temp_direction == "up" else "降温"
-        parts: list[str] = []
-        if tomorrow.tmax is not None:
-            parts.append(f"最高{tomorrow.tmax:.0f}℃")
-        if tomorrow.tmin is not None:
-            parts.append(f"最低{tomorrow.tmin:.0f}℃")
-        temp_range = "、".join(parts)
-        suffix = f"（{temp_range}）" if temp_range else ""
-        facts.append(f"明天{loc}会明显{verb}{suffix}")
-
-    if verdict.precip_hit and tomorrow.precip_prob is not None:
-        facts.append(f"明天{loc}有雨（降雨概率{tomorrow.precip_prob}%）")
-
-    if not facts:
-        return ""
-
-    advice: list[str] = []
+        facts.append(
+            "气温明显下降" if verdict.temp_direction == "down" else "气温明显上升"
+        )
+    advice = []
     if verdict.precip_hit:
-        advice.append("记得带伞")
+        advice.append("出门带伞")
     if verdict.temp_hit:
-        advice.append("注意添衣保暖" if verdict.temp_direction == "down" else "别穿太多热着")
-    advice_text = "，".join(advice)
-    tail = f"，提醒她{advice_text}" if advice_text else ""
-    return "；".join(facts) + tail
+        advice.append(
+            "注意添衣保暖" if verdict.temp_direction == "down" else "穿着注意散热"
+        )
+    return "，".join(
+        facts
+        + [
+            "提醒她" + "、".join(advice),
+            "按预报表达，天气可能变化；该来源不提供降雨概率，不推算百分比",
+        ]
+    )
 
 
 def describe_forecast(location: str, rows: list[DayRow]) -> str:
-    """把多天预报拼成给模型看的文本（用于按需查询工具）。"""
-    loc = location or "所在地"
-    if not rows:
-        return f"暂时取不到{loc}的天气数据。"
-    lines = [f"{loc}未来天气预报："]
+    lines = [f"{location or '所在地'}未来天气预报（来源：{SOURCE}）："]
     lines.extend(f"- {row.summary()}" for row in rows)
+    lines.append(
+        "此来源未提供降雨概率，不代表0%；只按上述天气现象表达，天气预报可能变化。"
+    )
     return "\n".join(lines)
+
+
+class _ProbabilityPage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.blocks = {}
+        self.active = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script" and attrs.get("type") == "application/json":
+            self.active = attrs.get("id")
+            if self.active in self.blocks:
+                raise ValueError("天气页面数据块重复")
+            self.blocks[self.active] = ""
+
+    def handle_data(self, data):
+        if self.active:
+            self.blocks[self.active] += data
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.active = None
+
+
+def parse_noon_probability(payload: str, now: datetime, location_key: str = "101924", location_name: str = "北京") -> float:
+    """读取华风爱科当前地区当天日/夜概率；地区、日期或概率缺失则拒绝。"""
+    import json
+
+    page = _ProbabilityPage()
+    page.feed(payload)
+    try:
+        city = json.loads(page.blocks["wx-city-data"])
+        rows = json.loads(page.blocks["wx-daily-forecast-data"])
+        if city.get("location_key") != location_key or city.get("name_zh") != location_name or city.get("region") != "china":
+            raise ValueError("天气页面地区不匹配")
+        today = now.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        matches = [row for row in rows if datetime.fromisoformat(row["Date"]).astimezone(ZoneInfo("Asia/Shanghai")).date() == today]
+        if len(matches) != 1:
+            raise ValueError("天气页面缺少当天唯一预报")
+        row = matches[0]
+        stamp = datetime.fromisoformat(row["Date"])
+        if stamp.utcoffset() != timedelta(hours=8):
+            raise ValueError("天气预报时区不匹配")
+        values = [row[period]["PrecipitationProbability"] for period in ("Day", "Night")]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not 0 <= v <= 100 for v in values):
+            raise ValueError("天气页面降水概率无效")
+        return float(max(values))
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("天气页面缺少有效概率数据") from exc
+
+
+def temperature_context(rows: list[dict], captured_at: str, now: datetime) -> str:
+    """只使用新近预报中当天的温度概况，不暴露数值或雨情。"""
+    try:
+        stamp = datetime.fromisoformat(captured_at)
+        if stamp.tzinfo is None or not -timedelta(minutes=5) <= now - stamp <= timedelta(hours=30):
+            return ""
+        today = now.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        matches = [r for r in rows if r.get("date") == today]
+        if len(matches) != 1:
+            return ""
+        row = matches[0]
+        high, low = _temperature(row.get("tmax")), _temperature(row.get("tmin"))
+        if high is None or low is None or high < low:
+            return ""
+        daytime = "偏热" if high >= 26 else "温和" if high >= 22 else "偏凉" if high >= 16 else "偏冷"
+        nighttime = "偏暖" if low >= 22 else "较凉爽" if low >= 18 else "偏凉" if low >= 12 else "偏冷"
+        return f"最近一次当地预报对今天的概况：白天{daytime}，早晚{nighttime}。这是预报概况，不代表她此刻实际体感。"
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
+
+def resolve_weather_location(location: str, profiles: dict | None = None) -> dict | None:
+    """Resolve a locally configured exact location name or alias."""
+    profiles = profiles or {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        if location.strip() == name or location.strip() in profile.get("aliases", []):
+            required = ("location_name", "location_label", "city_id", "probability_location_key", "probability_location_name")
+            if all(isinstance(profile.get(key), str) and profile[key].strip() for key in required):
+                return {key: profile[key] for key in required}
+    return None

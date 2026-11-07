@@ -8,20 +8,8 @@
   "location_name": {
     "description": "地点名称（仅用于话术）",
     "type": "string",
-    "default": "示例城市",
-    "hint": "只影响提醒文案里的称呼；真正的坐标以下方经纬度为准。"
-  },
-  "latitude": {
-    "description": "纬度",
-    "type": "float",
-    "default": 39.9042,
-    "hint": "示例城市中心 ≈ 39.9042。建议用坐标而不是城市名（Open-Meteo 的地理编码对某些区县名不敏感）。"
-  },
-  "longitude": {
-    "description": "经度",
-    "type": "float",
-    "default": 116.4074,
-    "hint": "示例城市区中心 ≈ 116.4074。"
+    "default": "北京",
+    "hint": "必须与中国天气网对应地区标题一致。"
   },
   "timezone": {
     "description": "时区",
@@ -49,12 +37,6 @@
     "default": 3.0,
     "hint": "明天最高温或最低温相对今天变化达到该值即提醒。设很大可关闭温差提醒。"
   },
-  "precip_probability_threshold": {
-    "description": "降雨概率阈值（%）",
-    "type": "int",
-    "default": 70,
-    "hint": "明天降雨概率「严格大于」该值才提醒。设 100 可关闭降雨提醒。"
-  },
   "owner_umo": {
     "description": "提醒投递目标（UMO）",
     "type": "string",
@@ -73,6 +55,41 @@
     "default": 15,
     "minimum": 3,
     "maximum": 60,
-    "hint": "访问 Open-Meteo 的超时。"
+    "hint": "访问中国天气网的超时；失败不回退其他来源。"
+  },
+  "city_id": {
+    "description": "中国天气网地区编号",
+    "type": "string",
+    "default": "101010100",
+    "hint": "填写当前地区中国天气网编号。"
+  },
+  "noon_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "中午12点检查当天降水概率",
+    "hint": "读取当前地区华风爱科网页，当天白天/夜间概率任一达到60%提醒带伞；窗口30分钟，失败最多每5分钟重取。"
+  },
+  "location_label": {
+    "type": "string",
+    "default": "北京",
+    "description": "当前天气地点全称",
+    "hint": "由set_weather_location随地点切换一并更新。"
+  },
+  "probability_location_key": {
+    "type": "string",
+    "default": "101924",
+    "description": "华风爱科当前地区编号",
+    "hint": "由set_weather_location随地点切换一并更新。"
+  },
+  "probability_location_name": {
+    "type": "string",
+    "default": "北京",
+    "description": "华风爱科当前地区名",
+    "hint": "由set_weather_location随地点切换一并更新。"
+  },
+  "location_profiles": {
+    "type": "dict",
+    "description": "可切换天气地点及别名",
+    "items": {}
   }
 }

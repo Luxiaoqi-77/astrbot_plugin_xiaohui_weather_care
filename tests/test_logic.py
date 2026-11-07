@@ -1,191 +1,120 @@
-"""纯逻辑离线测试：不触网、不依赖 AstrBot 上下文。"""
+"""离线验证官方区级预报解析、日期、雨雪判断及不编造概率。"""
 
-from __future__ import annotations
-
-import os
+from datetime import datetime, timedelta
+from pathlib import Path
 import sys
+from zoneinfo import ZoneInfo
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import pytest
 
-from logic import (  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from logic import (
     DayRow,
-    build_reminder_content,
     build_url,
-    describe_forecast,
-    evaluate,
     parse_daily,
+    evaluate,
+    build_reminder_content,
+    describe_forecast,
 )
 
-SAMPLE_PAYLOAD = {
-    "latitude": 39.9042,
-    "longitude": 116.4074,
-    "timezone": "Asia/Shanghai",
-    "daily_units": {"temperature_2m_max": "°C"},
-    "daily": {
-        "time": ["2026-10-16", "2026-10-17", "2026-10-18"],
-        "weather_code": [3, 53, 51],
-        "temperature_2m_max": [32.8, 32.9, 31.7],
-        "temperature_2m_min": [23.3, 24.0, 24.5],
-        "precipitation_probability_max": [0, 39, 72],
-    },
-}
+NOW = datetime(2026, 12, 31, 21, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
-def test_build_url_basic():
-    url = build_url(39.9042, 116.4074, "Asia/Shanghai", 3)
-    assert "latitude=39.9042" in url
-    assert "longitude=116.4074" in url
-    assert "forecast_days=3" in url
-    assert "precipitation_probability_max" in url
+def page(weather="多云", night_only=False):
+    items = []
+    for i in range(7):
+        date = NOW.date() + timedelta(days=i)
+        text = weather if i == 1 else "多云"
+        day = '<big class="png40 d01"></big>'
+        high = "<span>30℃</span>/"
+        if i == 0 and night_only:
+            day, high = '<big class="png40"></big>', ""
+        items.append(
+            f'<li class="sky skyid lv2"><h1>{date.day}日（预报）</h1>{day}<big class="png40 n01"></big><p class="wea" title="{text}">{text}</p><p class="tem">{high}<i>22℃</i></p></li>'
+        )
+    return (
+        '<title>天河天气预报,天河7天天气预报</title><input id="fc_24h_internal_update_time" value="2026123120"/>'
+        + "".join(items)
+    )
 
 
-def test_build_url_clamps_days():
-    assert "forecast_days=1" in build_url(1, 2, "Asia/Shanghai", 0)
-    assert "forecast_days=7" in build_url(1, 2, "Asia/Shanghai", 99)
+def test_district_url():
+    assert (
+        build_url("101280109") == "https://www.weather.com.cn/weather/101280109.shtml"
+    )
+    with pytest.raises(ValueError):
+        build_url("../101280109?x=1")
 
 
-def test_parse_daily_real_payload():
-    rows = parse_daily(SAMPLE_PAYLOAD)
-    assert [r.date for r in rows] == ["2026-10-16", "2026-10-17", "2026-10-18"]
-    assert rows[0].tmax == 32.8
-    assert rows[0].tmin == 23.3
-    assert rows[0].precip_prob == 0
-    assert rows[1].desc == "毛毛雨"
-    assert rows[2].desc == "毛毛雨"
+def test_parse_night_and_year_boundary():
+    rows = parse_daily(page(night_only=True), "天河", NOW, 7)
+    assert rows[0].tmax is None
+    assert rows[0].day_text.startswith("未知")
+    assert rows[0].tmin == 22
+    assert rows[1] == DayRow("2027-01-01", 30, 22, "多云", "多云")
+    assert rows[-1].date == "2027-01-06"
 
 
-def test_parse_daily_from_json_string():
-    import json
-
-    rows = parse_daily(json.dumps(SAMPLE_PAYLOAD))
-    assert len(rows) == 3
-
-
-def test_parse_daily_bad_payload():
-    assert parse_daily(None) == []
-    assert parse_daily("not json") == []
-    assert parse_daily({}) == []
-    assert parse_daily({"daily": {"time": []}}) == []
+@pytest.mark.parametrize("weather", ["多云", "晴", "阴", "雾", "霾", "沙尘暴"])
+def test_dry_forecast_does_not_trigger(weather):
+    rows = parse_daily(page(weather), "天河", NOW)
+    assert not evaluate(rows[0], rows[1], 3).triggered
 
 
-def test_parse_daily_missing_columns_keeps_none():
-    payload = {
-        "daily": {
-            "time": ["2026-10-16", "2026-10-17"],
-            "temperature_2m_max": [30.0],
-            "temperature_2m_min": [20.0],
-            "precipitation_probability_max": [10],
-            "weather_code": [0],
-        }
-    }
-    rows = parse_daily(payload)
-    assert rows[0].tmax == 30.0
-    # 第二天缺列 → None，不猜
-    assert rows[1].tmax is None
-    assert rows[1].precip_prob is None
-
-
-def _row(date="2026-10-17", tmax=30.0, tmin=20.0, prob=10, code=0):
-    return DayRow(date=date, code=code, tmax=tmax, tmin=tmin, precip_prob=prob)
-
-
-def test_evaluate_not_triggered_when_flat():
-    today = _row(date="2026-10-16", tmax=32.8, tmin=23.3, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=32.9, tmin=24.0, prob=39)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert verdict.triggered is False
-    assert verdict.temp_hit is False
-    assert verdict.precip_hit is False
-
-
-def test_evaluate_triggers_on_cooldown():
-    today = _row(date="2026-10-16", tmax=32.0, tmin=24.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=28.0, tmin=23.0, prob=10)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert verdict.triggered is True
-    assert verdict.temp_hit is True
-    assert verdict.temp_direction == "down"
-    assert verdict.max_delta == 4.0
-
-
-def test_evaluate_triggers_on_warming():
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=33.0, tmin=20.5, prob=10)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert verdict.triggered is True
-    assert verdict.temp_direction == "up"
-
-
-def test_evaluate_boundary_exactly_threshold():
-    # 恰好等于阈值 → 命中（>=）
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=33.0, tmin=20.0, prob=0)
-    assert evaluate(today, tomorrow, 3.0, 80).triggered is True
-
-
-def test_evaluate_just_below_threshold():
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=32.9, tmin=20.0, prob=0)
-    assert evaluate(today, tomorrow, 3.0, 80).triggered is False
-
-
-def test_evaluate_triggers_on_rain_probability():
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=30.0, tmin=20.0, prob=85, code=63)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert verdict.triggered is True
-    assert verdict.temp_hit is False
-    assert verdict.precip_hit is True
-
-
-def test_evaluate_precip_boundary_strict():
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    # 恰好 80 → 不命中（严格大于）
-    tomorrow = _row(date="2026-10-17", tmax=30.0, tmin=20.0, prob=80)
-    assert evaluate(today, tomorrow, 3.0, 80).triggered is False
-    # 81 → 命中
-    tomorrow2 = _row(date="2026-10-17", tmax=30.0, tmin=20.0, prob=81)
-    assert evaluate(today, tomorrow2, 3.0, 80).triggered is True
-
-
-def test_evaluate_missing_data_never_triggers():
-    today = DayRow(date="2026-10-16")
-    tomorrow = DayRow(date="2026-10-17")
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert verdict.triggered is False
-    assert evaluate(None, tomorrow, 3.0, 80).triggered is False
-    assert evaluate(today, None, 3.0, 80).triggered is False
-
-
-def test_build_reminder_content_cooldown_and_rain():
-    today = _row(date="2026-10-16", tmax=32.0, tmin=24.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=28.0, tmin=22.0, prob=90, code=63)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    content = build_reminder_content("示例城市", today, tomorrow, verdict)
-    assert "示例城市" in content
-    assert "降温" in content
+@pytest.mark.parametrize(
+    "weather", ["小雨", "雷阵雨", "多云转小雨", "小雨转晴", "雨夹雪", "小雪"]
+)
+def test_rain_or_snow_forecast_triggers_without_probability(weather):
+    rows = parse_daily(page(weather), "天河", NOW)
+    verdict = evaluate(rows[0], rows[1], 3)
+    assert verdict.precip_hit
+    content = build_reminder_content("天河", rows[0], rows[1], verdict)
     assert "带伞" in content
+    assert "%" not in content
+    assert "中央气象台" in content
+    if weather == "多云转小雨":
+        assert "白天多云、夜间小雨" in content
 
 
-def test_build_reminder_content_warming():
-    today = _row(date="2026-10-16", tmax=28.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=32.0, tmin=20.0, prob=0)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    content = build_reminder_content("示例城市", today, tomorrow, verdict)
-    assert "升温" in content
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda s: s.replace("天河天气", "海珠天气"),
+        lambda s: s.replace("2026123120", "2026122920"),
+        lambda s: s.replace("2026123120", "2027010120"),
+        lambda s: s.replace('id="fc_24h_internal_update_time"', 'id="removed"'),
+        lambda s: s.replace("1日（预报）", "15日（预报）"),
+        lambda s: s.replace('title="多云"', 'title=""'),
+        lambda s: s.replace('<li class="sky skyid lv2">', '<li class="other">', 1),
+        lambda s: "<html>访问验证</html>",
+    ],
+)
+def test_invalid_forecasts_fail_closed(mutate):
+    with pytest.raises(ValueError):
+        parse_daily(mutate(page()), "天河", NOW)
 
 
-def test_build_reminder_content_empty_when_not_triggered():
-    today = _row(date="2026-10-16", tmax=30.0, tmin=20.0, prob=0)
-    tomorrow = _row(date="2026-10-17", tmax=30.0, tmin=20.0, prob=10)
-    verdict = evaluate(today, tomorrow, 3.0, 80)
-    assert build_reminder_content("示例城市", today, tomorrow, verdict) == ""
+def test_missing_future_temp_is_error():
+    with pytest.raises(ValueError):
+        parse_daily(
+            page().replace("<span>30℃</span>", "<span>999℃</span>"), "天河", NOW
+        )
 
 
-def test_describe_forecast():
-    rows = parse_daily(SAMPLE_PAYLOAD)
-    text = describe_forecast("示例城市", rows)
-    assert "示例城市" in text
-    assert "2026-10-17" in text
-    assert "降雨概率39%" in text
-    assert describe_forecast("示例城市", []) != ""
+def test_query_does_not_call_missing_probability_zero():
+    rows = parse_daily(page(), "天河", NOW)
+    text = describe_forecast("天河", rows)
+    assert "未提供降雨概率" in text
+    assert "不代表0%" in text
+    assert "降雨概率0%" not in text
+
+
+def test_temperature_threshold_and_missing_values():
+    today = DayRow("2026-12-31", 30, 22, "晴", "晴")
+    tomorrow = DayRow("2027-01-01", 27, 22, "晴", "晴")
+    verdict = evaluate(today, tomorrow, 3)
+    assert verdict.temp_hit and not verdict.precip_hit
+    assert verdict.temp_direction == "down"
+    assert "添衣" in build_reminder_content("天河", today, tomorrow, verdict)
+    assert not evaluate(today, DayRow("2027-01-01"), 3).triggered
+    assert not evaluate(None, None, 3).triggered

@@ -71,3 +71,12 @@
 **实际部署时**请把它们改成你自己的 QQ 号和机器人 QQ 号（通常出现在
 `OWNER_UMO` / `OWNER_SENDER_ID` / `DEFAULT_OWNER_UMO` / `authorized_umo`
 等待配置项，或插件的配置文件里）。
+
+
+## 2026-11-07 代码更新
+
+晚间中国天气网逐日预报检查；中午华风爱科网页降水概率检查；按近期预报注入粗粒度冷暖背景；可配置地点切换。独立日去重与过期数据检查沿用现有提醒通道。
+
+本次 tag：`snapshot-2026-11-07`。配置中的示例账号需替换成本地目标账号。
+
+地点默认值仅为北京示例。`location_profiles` 按名称配置 `aliases`、`location_name`、`location_label`、`city_id`、`probability_location_key`、`probability_location_name`；设置后才允许工具切换到该地区。用户实际所在地不写入源代码。
